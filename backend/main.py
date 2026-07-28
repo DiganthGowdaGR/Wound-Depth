@@ -1014,6 +1014,56 @@ def _data_quality(record: dict[str, Any]) -> list[str]:
     ]
 
 
+def _measurement_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Provide a usable summary when an external narrative provider is unavailable.
+
+    This is deliberately assembled only from persisted WoundLens outputs. It is
+    not presented as a generative AI response and cannot add clinical claims.
+    """
+    analysis = record["analysis"]
+    assets = record.get("assets", {})
+    has_history = bool(_previous_visits(record["patient_id"], record["id"]))
+    notes_entered = bool((record.get("clinical_notes") or "").strip())
+    structural_findings = [
+        "The reconstructed wound region contains measurable variation in visible surface geometry.",
+        "Relative depth values describe the reconstructed visible surface and are not calibrated physical depth in millimetres.",
+    ]
+    thermal_findings = [
+        "A thermal image is available for clinician inspection of relative contrast. WoundLens does not interpret this image as a Celsius measurement."
+        if assets.get("thermal")
+        else "Thermal interpretation is omitted because no thermal image is available for this visit."
+    ]
+    attention_points = [
+        "Review the RGB wound localization, relative depth map, and 3D surface together with the clinical examination.",
+        "Confirm the wound assessment and current care plan in the clinical record.",
+    ]
+    if not notes_entered:
+        attention_points.append("No clinician context was entered for this visit.")
+    if not has_history:
+        attention_points.append("Only one saved visit is available, so longitudinal interpretation cannot be performed.")
+    return {
+        "headline": "WoundLens measurement summary",
+        "assessment_summary": (
+            "This summary organizes the saved WoundLens imaging measurements for clinician review. "
+            "It does not diagnose the wound or determine involvement of underlying tissue."
+        ),
+        "measured_findings": _measured_findings(analysis),
+        "structural_findings": structural_findings,
+        "thermal_findings": thermal_findings,
+        "attention_points": attention_points,
+        "data_quality": _data_quality(record),
+        "clinician_summary": (
+            "Use the recorded RGB, thermal, relative-depth, and 3D views with the patient examination and clinician-provided context."
+        ),
+        "patient_friendly_summary": (
+            "Your wound was scanned with normal, thermal, and surface-depth imaging. "
+            "Your care team will review these images with your symptoms and examination."
+        ),
+        "model_name": "WoundLens measured-output summary",
+        "generation_source": "measurement_fallback",
+    }
+
+
 def _previous_visits(patient_id: str, current_visit_id: str) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
     for visit_record in store.visits_for_patient(patient_id):
@@ -1198,10 +1248,15 @@ def explain_assessment(visit_id: str) -> dict[str, Any]:
     try:
         summary = ai_service.explain_assessment(payload).model_dump()
     except AIUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+        LOGGER.warning("AI narrative provider unavailable for visit %s: %s", visit_id, error)
+        summary = _measurement_summary(record)
+    else:
+        summary["generation_source"] = "ai_provider"
     summary["measured_findings"] = _measured_findings(record["analysis"])
     summary["data_quality"] = _data_quality(record)
     summary["model_name"] = ai_service.model_name
+    if summary["generation_source"] == "measurement_fallback":
+        summary["model_name"] = "WoundLens measured-output summary"
     store.save_summary(visit_id, summary)
     return {**summary, "reviewed_by_clinician": False, "reviewed_at": None}
 

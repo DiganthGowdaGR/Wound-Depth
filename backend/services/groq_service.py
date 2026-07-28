@@ -60,6 +60,7 @@ class GroqService:
         if primary_key and primary_key not in self._api_keys:
             self._api_keys.insert(0, primary_key)
         self._model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        self._timeout_seconds = max(3, int(os.environ.get("GROQ_TIMEOUT_SECONDS", "8")))
         self._next_key_index = 0
 
     @property
@@ -87,7 +88,7 @@ class GroqService:
             }).encode("utf-8")
             request = Request("https://api.groq.com/openai/v1/chat/completions", data=request_body, method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
             try:
-                with urlopen(request, timeout=25) as response:
+                with urlopen(request, timeout=self._timeout_seconds) as response:
                     content = json.loads(response.read().decode("utf-8"))["choices"][0]["message"]["content"]
                 return schema.model_validate(json.loads(content))
             except (HTTPError, URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValidationError) as error:

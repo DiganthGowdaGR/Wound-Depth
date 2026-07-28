@@ -69,6 +69,18 @@ class WoundLensStore:
                 );
                 """
             )
+            self._add_column_if_missing(connection, "ai_summaries", "model_name", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(connection, "ai_summaries", "headline", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(connection, "ai_summaries", "measured_findings_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._add_column_if_missing(connection, "ai_summaries", "data_quality_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._add_column_if_missing(connection, "ai_summaries", "reviewed_by_clinician", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(connection, "ai_summaries", "reviewed_at", "TEXT")
+
+    @staticmethod
+    def _add_column_if_missing(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _now() -> str:
@@ -151,10 +163,19 @@ class WoundLensStore:
     def save_summary(self, visit_id: str, summary: dict[str, Any]) -> None:
         with self._connection() as connection:
             connection.execute(
-                "INSERT INTO ai_summaries(id, visit_id, assessment_summary, structural_findings_json, thermal_findings_json, attention_points_json, clinician_summary, patient_friendly_summary, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(visit_id) DO UPDATE SET assessment_summary=excluded.assessment_summary, structural_findings_json=excluded.structural_findings_json, thermal_findings_json=excluded.thermal_findings_json, attention_points_json=excluded.attention_points_json, clinician_summary=excluded.clinician_summary, patient_friendly_summary=excluded.patient_friendly_summary, created_at=excluded.created_at",
-                (uuid.uuid4().hex, visit_id, summary["assessment_summary"], json.dumps(summary["structural_findings"]), json.dumps(summary["thermal_findings"]), json.dumps(summary["attention_points"]), summary["clinician_summary"], summary["patient_friendly_summary"], self._now()),
+                "INSERT INTO ai_summaries(id, visit_id, assessment_summary, structural_findings_json, thermal_findings_json, attention_points_json, clinician_summary, patient_friendly_summary, created_at, model_name, headline, measured_findings_json, data_quality_json, reviewed_by_clinician, reviewed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL) ON CONFLICT(visit_id) DO UPDATE SET assessment_summary=excluded.assessment_summary, structural_findings_json=excluded.structural_findings_json, thermal_findings_json=excluded.thermal_findings_json, attention_points_json=excluded.attention_points_json, clinician_summary=excluded.clinician_summary, patient_friendly_summary=excluded.patient_friendly_summary, created_at=excluded.created_at, model_name=excluded.model_name, headline=excluded.headline, measured_findings_json=excluded.measured_findings_json, data_quality_json=excluded.data_quality_json, reviewed_by_clinician=0, reviewed_at=NULL",
+                (uuid.uuid4().hex, visit_id, summary["assessment_summary"], json.dumps(summary["structural_findings"]), json.dumps(summary["thermal_findings"]), json.dumps(summary["attention_points"]), summary["clinician_summary"], summary["patient_friendly_summary"], self._now(), summary.get("model_name", ""), summary.get("headline", ""), json.dumps(summary.get("measured_findings", [])), json.dumps(summary.get("data_quality", []))),
             )
+
+    def update_clinical_notes(self, visit_id: str, clinical_notes: str) -> None:
+        with self._connection() as connection:
+            connection.execute("UPDATE visits SET clinical_notes = ? WHERE id = ?", (clinical_notes, visit_id))
+
+    def mark_summary_reviewed(self, visit_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            connection.execute("UPDATE ai_summaries SET reviewed_by_clinician = 1, reviewed_at = ? WHERE visit_id = ?", (self._now(), visit_id))
+        return self.visit(visit_id)
 
     def save_plan(self, visit_id: str, plan: dict[str, Any]) -> None:
         with self._connection() as connection:
@@ -195,7 +216,7 @@ class WoundLensStore:
         if analysis:
             result["analysis"] = {"id": analysis["id"], "wound_roi_pixels": analysis["wound_roi_pixels"], "relative_depth_range": analysis["relative_depth_range"], "mean_depth_variation": analysis["mean_depth_variation"], "depth_variation_std": analysis["depth_variation_std"], "thermal_summary": analysis["thermal_summary"], "created_at": analysis["created_at"]}
         if summary:
-            result["ai_summary"] = {"assessment_summary": summary["assessment_summary"], "structural_findings": json.loads(summary["structural_findings_json"]), "thermal_findings": json.loads(summary["thermal_findings_json"]), "attention_points": json.loads(summary["attention_points_json"]), "clinician_summary": summary["clinician_summary"], "patient_friendly_summary": summary["patient_friendly_summary"], "created_at": summary["created_at"]}
+            result["ai_summary"] = {"headline": summary["headline"], "assessment_summary": summary["assessment_summary"], "measured_findings": json.loads(summary["measured_findings_json"]), "structural_findings": json.loads(summary["structural_findings_json"]), "thermal_findings": json.loads(summary["thermal_findings_json"]), "attention_points": json.loads(summary["attention_points_json"]), "data_quality": json.loads(summary["data_quality_json"]), "clinician_summary": summary["clinician_summary"], "patient_friendly_summary": summary["patient_friendly_summary"], "model_name": summary["model_name"], "reviewed_by_clinician": bool(summary["reviewed_by_clinician"]), "reviewed_at": summary["reviewed_at"], "created_at": summary["created_at"]}
         if plan:
             result["clinical_plan"] = {"clinician_assessment": plan["clinician_assessment"], "medication": plan["medication"], "wound_care_plan": plan["wound_care_plan"], "follow_up_interval": plan["follow_up_interval"], "additional_tests": plan["additional_tests"], "escalation_required": bool(plan["escalation_required"]), "created_at": plan["created_at"]}
         return result

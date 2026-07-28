@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from backend.database import DATABASE_PATH
 from backend.environment import load_local_env
 from backend.persistence import WoundLensStore
-from backend.schemas import ClinicalPlanInput, PatientCreate, VisitCreate
+from backend.schemas import ClinicalContextInput, ClinicalPlanInput, PatientCreate, VisitCreate
 from backend.services.groq_service import AIUnavailable, GroqService
 from backend.services.report_service import create_report
 from backend.services.storage_service import StorageService
@@ -989,6 +989,74 @@ def _visit_response(record: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _measured_findings(analysis: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"label": "Relative depth range", "value": f"{analysis['relative_depth_range']:.2f} relative units", "interpretation": "Variation across the reconstructed visible wound surface."},
+        {"label": "Mean surface variation", "value": f"{analysis['mean_depth_variation']:.2f}", "interpretation": "Average magnitude of relative surface variation in the analyzed wound region."},
+        {"label": "Depth variation", "value": f"{analysis['depth_variation_std']:.2f}", "interpretation": "Heterogeneity of the reconstructed relative surface geometry."},
+        {"label": "Detected wound ROI", "value": f"{analysis['wound_roi_pixels']} pixels", "interpretation": "Image pixels classified as belonging to the analyzed wound region."},
+    ]
+
+
+def _data_quality(record: dict[str, Any]) -> list[str]:
+    assets = record.get("assets", {})
+    analysis = record.get("analysis")
+    return [
+        f"RGB: {'Available' if assets.get('rgb') else 'Unavailable'}",
+        f"Thermal: {'Available' if assets.get('thermal') else 'Unavailable'}",
+        f"Depth: {'Available' if assets.get('depth') else 'Unavailable'}",
+        f"Wound localization: {'Available' if assets.get('rgb_roi') else 'Unavailable'}",
+        f"3D reconstruction: {'Available' if assets.get('surface') else 'Unavailable'}",
+        f"Structural metrics: {'Available' if analysis else 'Unavailable'}",
+        "Relative depth values are not calibrated physical depth in millimetres.",
+    ]
+
+
+def _previous_visits(patient_id: str, current_visit_id: str) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for visit_record in store.visits_for_patient(patient_id):
+        if visit_record["id"] == current_visit_id:
+            continue
+        item: dict[str, Any] = {"visit_date": visit_record["visit_date"]}
+        if visit_record.get("analysis"):
+            item["structural_analysis"] = visit_record["analysis"]
+        if visit_record.get("clinical_notes"):
+            item["clinician_notes"] = visit_record["clinical_notes"]
+        if visit_record.get("ai_summary"):
+            item["previous_ai_summary"] = visit_record["ai_summary"]["assessment_summary"]
+        if visit_record.get("clinical_plan"):
+            item["clinical_plan"] = visit_record["clinical_plan"]
+        history.append(item)
+    return history[:5]
+
+
+def _ai_assessment_payload(record: dict[str, Any]) -> dict[str, Any]:
+    analysis = record.get("analysis")
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Saved analysis was not found.")
+    assets = record.get("assets", {})
+    return {
+        "patient": {"patient_code": record["patient_code"]},
+        "visit": {"visit_id": record["id"], "visit_date": record["visit_date"]},
+        "structural_analysis": {
+            "wound_roi_pixels": analysis["wound_roi_pixels"],
+            "relative_depth_range": analysis["relative_depth_range"],
+            "mean_absolute_variation": analysis["mean_depth_variation"],
+            "depth_variation_std": analysis["depth_variation_std"],
+        },
+        "thermal_analysis": {"available": bool(assets.get("thermal")), "relative_thermal_summary": analysis["thermal_summary"] if assets.get("thermal") else None},
+        "analysis_quality": {
+            "segmentation_status": "success" if assets.get("rgb_roi") else "unavailable",
+            "depth_available": bool(assets.get("depth")),
+            "thermal_available": bool(assets.get("thermal")),
+            "rgb_available": bool(assets.get("rgb")),
+            "surface_3d_available": bool(assets.get("surface")),
+        },
+        "clinician_notes": record["clinical_notes"] or None,
+        "previous_visits": _previous_visits(record["patient_id"], record["id"]),
+    }
+
+
 @app.post("/patients")
 def create_patient(patient: PatientCreate) -> dict[str, Any]:
     try:
@@ -1124,23 +1192,45 @@ def explain_assessment(visit_id: str) -> dict[str, Any]:
     record = store.visit(visit_id)
     if record is None or not record.get("analysis"):
         raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    analysis = record["analysis"]
-    payload = {
-        "patient_id": record["patient_id"],
-        "visit_id": record["id"],
-        "wound_roi_pixels": analysis["wound_roi_pixels"],
-        "relative_depth_range": analysis["relative_depth_range"],
-        "mean_absolute_depth_variation": analysis["mean_depth_variation"],
-        "depth_variation_std": analysis["depth_variation_std"],
-        "thermal_summary": analysis["thermal_summary"],
-        "clinical_notes": record["clinical_notes"],
-    }
+    payload = _ai_assessment_payload(record)
     try:
         summary = ai_service.explain_assessment(payload).model_dump()
     except AIUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    summary["measured_findings"] = _measured_findings(record["analysis"])
+    summary["data_quality"] = _data_quality(record)
+    summary["model_name"] = ai_service.model_name
     store.save_summary(visit_id, summary)
-    return summary
+    return {**summary, "reviewed_by_clinician": False, "reviewed_at": None}
+
+
+@app.post("/visits/{visit_id}/clinical-context")
+def save_clinical_context(visit_id: str, context: ClinicalContextInput) -> dict[str, str]:
+    if store.visit(visit_id) is None:
+        raise HTTPException(status_code=404, detail="Visit was not found.")
+    store.update_clinical_notes(visit_id, context.clinical_notes)
+    return {"clinical_notes": context.clinical_notes}
+
+
+@app.post("/visits/{visit_id}/ai-summary/review")
+def mark_ai_summary_reviewed(visit_id: str) -> dict[str, Any]:
+    record = store.mark_summary_reviewed(visit_id)
+    if record is None or not record.get("ai_summary"):
+        raise HTTPException(status_code=404, detail="AI summary was not found.")
+    return record["ai_summary"]
+
+
+@app.post("/ai/summarize-history/{patient_id}")
+def summarize_history(patient_id: str) -> dict[str, Any]:
+    if store.patient(patient_id) is None:
+        raise HTTPException(status_code=404, detail="Patient was not found.")
+    visits = _previous_visits(patient_id, "")
+    if not visits:
+        raise HTTPException(status_code=404, detail="No saved visits were found for this patient.")
+    try:
+        return ai_service.summarize_history({"patient_code": store.patient(patient_id)["patient_code"], "previous_visits": visits}).model_dump()
+    except AIUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @app.post("/visits/{visit_id}/clinical-plan")

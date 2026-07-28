@@ -22,6 +22,8 @@ __pycache__/
 woundlens_data/
 dataset/
 *.sqlite3
+backend/woundlens.db
+backend/storage/
 *.pdf
 
 # OS and editor files

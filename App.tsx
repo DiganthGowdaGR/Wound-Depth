@@ -1,7 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { analyzeCurrent, getCaseHistory, getCases, CurrentWoundAssessment, PatientWoundHistory, UploadedScanInput } from './src/services/woundlensApi';
+import { ActivityIndicator, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { analyzeCurrent, createPatient, CurrentWoundAssessment, getPatientVisits, getPatients, getReports, Patient, SavedReport, SavedVisit, UploadedScanInput } from './src/services/woundlensApi';
 import { BottomNav, Header } from './src/components/Chrome';
 import { DashboardScreen } from './src/screens/DashboardScreen';
 import { PatientListScreen } from './src/screens/PatientListScreen';
@@ -9,166 +9,22 @@ import { PatientDetailScreen } from './src/screens/PatientDetailScreen';
 import { WoundHistoryScreen } from './src/screens/WoundHistoryScreen';
 import { ScanScreen } from './src/screens/ScanScreen';
 import { ResultScreen } from './src/screens/ResultScreen';
+import { ReportsScreen } from './src/screens/ReportsScreen';
 import { EmptyModuleScreen } from './src/screens/EmptyModuleScreen';
-import { colors, layout, typography } from './src/theme';
+import { colors, typography } from './src/theme';
 
 export type ScreenKey = 'dashboard' | 'patients' | 'detail' | 'history' | 'reports' | 'profile' | 'scan' | 'result';
 
 export default function App() {
-  const [screen, setScreen] = useState<ScreenKey>('scan');
-  const [history, setHistory] = useState<PatientWoundHistory | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [currentAssessment, setCurrentAssessment] = useState<CurrentWoundAssessment | null>(null);
-
-  const loadDataset = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    await getCases()
-      .then(async (availableCases) => {
-        const initialCase = availableCases.find((item) => item.caseId === 'case_12') ?? availableCases[0];
-        if (!initialCase) {
-          setHistory(null);
-          return;
-        }
-        setHistory(await getCaseHistory(initialCase.caseId));
-      })
-      .catch((loadError: Error) => setError(loadError.message || 'Unable to load the configured WoundLens dataset.'))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    void loadDataset();
-  }, [loadDataset]);
-
-  const showCurrentAnalysis = async (uploads: Record<'rgb' | 'thermal' | 'depth', UploadedScanInput>) => {
-    const assessment = await analyzeCurrent(uploads);
-    setCurrentAssessment(assessment);
-    setScreen('result');
-  };
-
-  const renderScreen = () => {
-    if (loading && screen !== 'scan') {
-      return (
-        <CenteredState>
-          <ActivityIndicator color={colors.primary} size="large" />
-          <Text style={styles.stateTitle}>Loading patient analysis</Text>
-        </CenteredState>
-      );
-    }
-
-    if (error && screen !== 'scan') {
-      return (
-        <CenteredState>
-          <Text style={styles.errorTitle}>Analysis unavailable</Text>
-          <Text style={styles.errorText}>{error}</Text>
-          <Pressable style={styles.retryButton} onPress={() => void loadDataset()}>
-            <Text style={styles.retryText}>Retry</Text>
-          </Pressable>
-        </CenteredState>
-      );
-    }
-
-    if (!history && screen !== 'scan') {
-      return (
-        <CenteredState>
-          <Text style={styles.stateTitle}>No dataset visits loaded</Text>
-          <Text style={styles.errorText}>The model will not run until a baseline and follow-up visit with RGB, thermal, and depth images are available.</Text>
-          <Pressable style={styles.retryButton} onPress={() => void loadDataset()}>
-            <Text style={styles.retryText}>Check Dataset</Text>
-          </Pressable>
-        </CenteredState>
-      );
-    }
-
-    switch (screen) {
-      case 'patients':
-        return <PatientListScreen />;
-      case 'detail':
-        return <PatientDetailScreen history={history!} onOpenHistory={() => setScreen('history')} onStartScan={() => setScreen('scan')} />;
-      case 'history':
-        return <WoundHistoryScreen history={history!} onOpenResult={() => setScreen('scan')} />;
-      case 'reports':
-        return <EmptyModuleScreen title="Reports" message="No reports generated yet." icon="document-text-outline" />;
-      case 'profile':
-        return <EmptyModuleScreen title="Profile" message="No profile information is available yet." icon="person-outline" />;
-      case 'scan':
-        return <ScanScreen history={history ?? undefined} onCurrentAnalyze={showCurrentAnalysis} />;
-      case 'result':
-        return <ResultScreen history={history ?? undefined} currentAssessment={currentAssessment ?? undefined} onOpenHistory={() => setScreen(history ? 'history' : 'scan')} />;
-      case 'dashboard':
-      default:
-        return <DashboardScreen onStartScan={() => setScreen('scan')} />;
-    }
-  };
-
-  const isBackScreen = screen === 'detail' || screen === 'history' || screen === 'reports' || screen === 'profile' || screen === 'scan' || screen === 'result';
-
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <Header showBack={isBackScreen} onBack={() => setScreen(screen === 'detail' ? 'patients' : 'detail')} />
-      <View style={styles.body}>{renderScreen()}</View>
-      <BottomNav active={screen} onNavigate={setScreen} />
-    </SafeAreaView>
-  );
+  const [screen, setScreen] = useState<ScreenKey>('patients'); const [patients, setPatients] = useState<Patient[]>([]); const [reports, setReports] = useState<SavedReport[]>([]); const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null); const [visits, setVisits] = useState<SavedVisit[]>([]); const [assessment, setAssessment] = useState<CurrentWoundAssessment | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
+  const refresh = useCallback(async () => { setLoading(true); setError(null); try { const [savedPatients, savedReports] = await Promise.all([getPatients(), getReports()]); setPatients(savedPatients); setReports(savedReports); if (selectedPatient) { const refreshed = savedPatients.find((patient) => patient.id === selectedPatient.id) ?? null; setSelectedPatient(refreshed); if (refreshed) setVisits(await getPatientVisits(refreshed.id)); } } catch (err) { setError(err instanceof Error ? err.message : 'Unable to connect to WoundLens backend.'); } finally { setLoading(false); } }, [selectedPatient]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  const selectPatient = async (patient: Patient) => { setSelectedPatient(patient); setLoading(true); try { setVisits(await getPatientVisits(patient.id)); setScreen('detail'); } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load patient visits.'); } finally { setLoading(false); } };
+  const addPatient = async (input: { patientCode: string; displayName: string; age?: number }) => { const patient = await createPatient(input); setPatients((items) => [patient, ...items]); await selectPatient(patient); };
+  const runAnalysis = async (uploads: Record<'rgb' | 'thermal' | 'depth', UploadedScanInput>) => { if (!selectedPatient) throw new Error('Select a patient before analyzing a scan.'); const result = await analyzeCurrent(selectedPatient.id, uploads); setAssessment(result); setVisits(await getPatientVisits(selectedPatient.id)); setReports(await getReports()); setScreen('result'); };
+  const openVisit = (visit: SavedVisit) => { if (!visit.analysis || !visit.assets) return; setAssessment({ analysisId: visit.analysis.id, patientId: visit.patientId, visitId: visit.id, assets: visit.assets, woundRoiPixels: visit.analysis.woundRoiPixels, relativeDepthRange: visit.analysis.relativeDepthRange, meanAbsoluteDepthVariation: visit.analysis.meanAbsoluteDepthVariation, depthVariationStd: visit.analysis.depthVariationStd, surfaceRegionLabel: '3D Wound Surface - Automatic ROI', roiMappingMethod: 'Automatic RGB/thermal wound mask in original image coordinates', segmentationStatus: 'success', segmentationScore: 0, thermalAssistanceUsed: true }); setScreen('result'); };
+  const content = () => { if (loading && screen !== 'scan') return <View style={styles.state}><ActivityIndicator color={colors.primary} size="large" /><Text style={styles.stateText}>Loading saved WoundLens data</Text></View>; if (error && screen !== 'scan') return <View style={styles.state}><Text style={styles.error}>{error}</Text></View>; switch (screen) { case 'patients': return <PatientListScreen patients={patients} onCreate={addPatient} onOpen={(patient) => void selectPatient(patient)} />; case 'detail': return selectedPatient ? <PatientDetailScreen patient={selectedPatient} onOpenHistory={() => setScreen('history')} onStartScan={() => setScreen('scan')} /> : <PatientListScreen patients={patients} onCreate={addPatient} onOpen={(patient) => void selectPatient(patient)} />; case 'history': return <WoundHistoryScreen visits={visits} onOpenVisit={openVisit} />; case 'reports': return <ReportsScreen reports={reports} />; case 'scan': return <ScanScreen patient={selectedPatient ?? undefined} onCurrentAnalyze={runAnalysis} />; case 'result': return <ResultScreen currentAssessment={assessment ?? undefined} onOpenHistory={() => setScreen('scan')} />; case 'profile': return <EmptyModuleScreen title="Profile" message="Profile information is not configured." icon="person-outline" />; default: return <DashboardScreen onStartScan={() => setScreen('scan')} />; } };
+  const isBackScreen = ['detail', 'history', 'reports', 'profile', 'scan', 'result'].includes(screen);
+  return <SafeAreaView style={styles.safeArea}><StatusBar style="dark" /><Header showBack={isBackScreen} onBack={() => setScreen(screen === 'detail' ? 'patients' : selectedPatient ? 'detail' : 'patients')} /><View style={styles.body}>{content()}</View><BottomNav active={screen} onNavigate={setScreen} /></SafeAreaView>;
 }
-
-function CenteredState({ children }: { children: React.ReactNode }) {
-  return (
-    <ScrollView contentContainerStyle={styles.centeredContent}>
-      <View style={styles.stateCard}>{children}</View>
-    </ScrollView>
-  );
-}
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.appBackground,
-  },
-  body: {
-    flex: 1,
-  },
-  centeredContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: layout.pagePadding,
-  },
-  stateCard: {
-    width: '100%',
-    maxWidth: 460,
-    minHeight: 220,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-    gap: 14,
-  },
-  stateTitle: {
-    ...typography.subtitle,
-  },
-  errorTitle: {
-    ...typography.title,
-    color: colors.danger,
-  },
-  errorText: {
-    ...typography.body,
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  retryButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: 22,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  retryText: {
-    ...typography.button,
-    color: colors.onPrimary,
-  },
-});
+const styles = StyleSheet.create({ safeArea: { flex: 1, backgroundColor: colors.appBackground }, body: { flex: 1 }, state: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 }, stateText: { ...typography.body, color: colors.textMuted }, error: { ...typography.body, color: colors.danger, textAlign: 'center' } });

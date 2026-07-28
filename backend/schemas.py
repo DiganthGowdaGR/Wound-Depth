@@ -19,3 +19,7 @@ class ClinicalPlanInput(BaseModel):
     follow_up_interval: str = ""
     additional_tests: str = ""
     escalation_required: bool = False
+
+
+class ClinicalContextInput(BaseModel):
+    clinical_notes: str = ""

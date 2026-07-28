@@ -22,7 +22,7 @@ Set the dataset directory only when using the dataset visit screens:
 $env:WOUNDLENS_DATASET_DIR="C:\path\to\results"
 ```
 
-Groq is optional and is used only by the FastAPI documentation-assistant endpoint. Do not add API keys to source files. Set one key or a comma-separated failover list before launching the backend:
+Groq is optional and is used only by the FastAPI documentation-assistant endpoint. Do not add API keys to source files. Copy `.env.example` to the ignored root `.env`, then set one key or a comma-separated failover list before launching the backend:
 
 ```powershell
 $env:GROQ_API_KEY="your-key"

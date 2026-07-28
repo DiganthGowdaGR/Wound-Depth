@@ -2,14 +2,14 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useState } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { PatientWoundHistory, UploadedScanInput } from '../services/woundlensApi';
+import { Patient, UploadedScanInput } from '../services/woundlensApi';
 import { Card, Pill, PrimaryButton } from '../components/Primitives';
 import { colors, layout, typography } from '../theme';
 
 type UploadModality = 'rgb' | 'thermal' | 'depth';
 type Uploads = Partial<Record<UploadModality, UploadedScanInput>>;
 
-export function ScanScreen({ history, onCurrentAnalyze }: { history?: PatientWoundHistory; onCurrentAnalyze: (uploads: Record<UploadModality, UploadedScanInput>) => Promise<void> }) {
+export function ScanScreen({ patient, onCurrentAnalyze }: { patient?: Patient; onCurrentAnalyze: (uploads: Record<UploadModality, UploadedScanInput>) => Promise<void> }) {
   const compact = useWindowDimensions().width < 620;
   const [uploads, setUploads] = useState<Uploads>({});
   const [error, setError] = useState<string | null>(null);
@@ -30,20 +30,9 @@ export function ScanScreen({ history, onCurrentAnalyze }: { history?: PatientWou
     setUploads((previous) => ({ ...previous, [modality]: { uri: asset.uri, fileName: asset.fileName ?? `${modality}.jpg`, mimeType: asset.mimeType ?? 'image/jpeg' } }));
   };
 
-  const loadDemo = () => {
-    if (!history) { setError('The demo dataset is not available. Start the backend with WOUNDLENS_DATASET_DIR configured.'); return; }
-    const demoVisit = history.visits.find((visit) => visit.day === 1) ?? history.currentVisit;
-    if (!demoVisit.assets.rgb || !demoVisit.assets.thermal || !demoVisit.assets.depth) { setError('The demo visit does not contain all three real scan modalities.'); return; }
-    setError(null);
-    setUploads({
-      rgb: { uri: demoVisit.assets.rgb, fileName: 'photo.png', mimeType: 'image/png' },
-      thermal: { uri: demoVisit.assets.thermal, fileName: 'thermal.png', mimeType: 'image/png' },
-      depth: { uri: demoVisit.assets.depth, fileName: 'depth.png', mimeType: 'image/png' },
-    });
-  };
-
   const analyze = async () => {
     setError(null);
+    if (!patient) { setError('Select or create a patient before analyzing a scan.'); return; }
     if (!complete) { setError('RGB, thermal, and depth images are required.'); return; }
     setAnalyzing(true);
     try { await onCurrentAnalyze(uploads as Record<UploadModality, UploadedScanInput>); }
@@ -52,15 +41,14 @@ export function ScanScreen({ history, onCurrentAnalyze }: { history?: PatientWou
   };
 
   return <ScrollView contentContainerStyle={styles.page}><View style={styles.content}>
-    <View><Text style={typography.title}>Scan Wound</Text><Text style={styles.subcopy}>Upload RGB, thermal, and depth scans. WoundLens automatically selects the visible wound region for relative surface analysis.</Text></View>
+    <View><Text style={typography.title}>Scan Wound</Text><Text style={styles.subcopy}>{patient ? `Patient: ${patient.displayName} (${patient.patientCode})` : 'Select a patient from Patients before uploading scans.'}</Text><Text style={styles.subcopy}>Upload RGB, thermal, and depth scans. WoundLens automatically selects the visible wound region for relative surface analysis.</Text></View>
     <View style={[styles.captureGrid, compact && styles.captureStack]}>
       <CaptureCard modality="rgb" icon="camera-iris" title="RGB Image" subtitle="Camera or photo upload" upload={uploads.rgb} onPick={pick} onRemove={() => setUploads((items) => ({ ...items, rgb: undefined }))} />
       <CaptureCard modality="thermal" icon="thermometer" title="Thermal Image" subtitle="Upload thermal scan" upload={uploads.thermal} onPick={pick} onRemove={() => setUploads((items) => ({ ...items, thermal: undefined }))} />
       <CaptureCard modality="depth" icon="layers-triple-outline" title="Depth Image" subtitle="Upload depth scan" upload={uploads.depth} onPick={pick} onRemove={() => setUploads((items) => ({ ...items, depth: undefined }))} />
     </View>
-    <PrimaryButton icon="download-outline" onPress={loadDemo}>Load Demo Scan</PrimaryButton>
     {error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text></View> : null}
-    <PrimaryButton icon="bar-chart-outline" onPress={() => void analyze()} disabled={analyzing || !complete}>{analyzing ? 'Analyzing...' : 'Analyze Wound'}</PrimaryButton>
+    <PrimaryButton icon="bar-chart-outline" onPress={() => void analyze()} disabled={analyzing || !complete || !patient}>{analyzing ? 'Analyzing...' : 'Analyze Current Wound'}</PrimaryButton>
     <View style={styles.statusRow}><Pill tone="primary">{Object.keys(uploads).length}/3 modalities ready</Pill>{complete ? <Pill tone="success">AUTOMATIC DETECTION READY</Pill> : null}</View>
   </View></ScrollView>;
 }

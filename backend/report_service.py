@@ -26,23 +26,23 @@ def create_report(destination: Path, record: dict[str, Any]) -> None:
     document = SimpleDocTemplate(str(destination), pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story: list[Any] = [Paragraph("WoundLens Clinical Assessment Report", styles["Title"]), Spacer(1, 8)]
     story.extend([
-        Paragraph(f"Patient / Case: {record['patient_id']}", styles["BodyText"]),
-        Paragraph(f"Visit: {record['visit_id']}", styles["BodyText"]),
+        Paragraph(f"Patient ID: {record.get('patient_code', record['patient_id'])}", styles["BodyText"]),
+        Paragraph(f"Visit date: {record.get('visit_date', record['id'])}", styles["BodyText"]),
         Spacer(1, 12),
     ])
-    assets = record["assets"]
+    assets = {name: Path(path) for name, path in record["assets"].items()}
     story.append(Table([
         [_image(assets.get("rgb_roi", Path())), _image(assets.get("thermal", Path()))],
         [_image(assets.get("relative_depth", Path())), _image(assets.get("surface", Path()))],
     ], colWidths=[3.55 * inch, 3.55 * inch], hAlign="CENTER"))
     story.append(Spacer(1, 12))
-    metrics = record["metrics"]
-    metric_rows = [["Structural measurement", "Value"], ["Detected wound ROI pixels", str(metrics["wound_roi_pixels"])], ["Relative depth range", f"{metrics['relative_depth_range']:.2f}"], ["Mean absolute depth variation", f"{metrics['mean_absolute_depth_variation']:.2f}"], ["Depth variation standard deviation", f"{metrics['depth_variation_std']:.2f}"]]
+    metrics = record["analysis"]
+    metric_rows = [["Structural measurement", "Value"], ["Detected wound ROI pixels", str(metrics["wound_roi_pixels"])], ["Relative depth range", f"{metrics['relative_depth_range']:.2f}"], ["Mean absolute depth variation", f"{metrics['mean_depth_variation']:.2f}"], ["Depth variation standard deviation", f"{metrics['depth_variation_std']:.2f}"]]
     metric_table = Table(metric_rows, colWidths=[3.8 * inch, 2.8 * inch])
     metric_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e9f0ff")), ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#b9c7dd")), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("PADDING", (0, 0), (-1, -1), 6)]))
     story.extend([Paragraph("Structural Measurements", styles["Heading2"]), metric_table, Spacer(1, 12)])
-    if record.get("gemini_summary"):
-        summary = record["gemini_summary"]
+    if record.get("ai_summary"):
+        summary = record["ai_summary"]
         story.append(Paragraph("AI-Assisted Summary", styles["Heading2"]))
         story.append(Paragraph(summary.get("assessment_summary", ""), styles["BodyText"]))
         for finding in summary.get("structural_findings", []) + summary.get("thermal_findings", []) + summary.get("attention_points", []):

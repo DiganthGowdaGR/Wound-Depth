@@ -22,9 +22,12 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 
-from backend.gemini_service import GeminiService, GeminiUnavailable
+from backend.database import DATABASE_PATH
 from backend.persistence import WoundLensStore
-from backend.report_service import create_report
+from backend.schemas import ClinicalPlanInput, PatientCreate, VisitCreate
+from backend.services.groq_service import AIUnavailable, GroqService
+from backend.services.report_service import create_report
+from backend.services.storage_service import StorageService
 
 matplotlib.use("Agg")
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -132,6 +135,11 @@ class AnalyzeCurrentResponse(BaseModel):
     segmentation_status: str
     segmentation_score: float
     thermal_assistance_used: bool
+    rgb_url: str
+    thermal_url: str
+    wound_overlay_url: str
+    relative_depth_map_url: str
+    surface_3d_url: str
 
 
 class AiExplanationRequest(BaseModel):
@@ -866,7 +874,9 @@ def _analyze_pair(
     return result.model_copy(update={"assets": assets, "assessments": assessments, "surface_region_label": surface_label})
 
 
-def _analyze_current_scan(sources: dict[str, UploadFile]) -> AnalyzeCurrentResponse:
+def _analyze_current_scan(sources: dict[str, UploadFile], patient_id: str, clinical_notes: str) -> AnalyzeCurrentResponse:
+    if store.patient(patient_id) is None:
+        raise HTTPException(status_code=404, detail="Patient was not found.")
     _cleanup_expired_sessions()
     session_id = uuid.uuid4().hex
     session_path = SESSION_DIR / session_id
@@ -901,8 +911,6 @@ def _analyze_current_scan(sources: dict[str, UploadFile]) -> AnalyzeCurrentRespo
         mean_absolute_depth_variation=geometry.mean_absolute_variation,
         depth_variation_std=geometry.depth_variation_std,
     )
-    patient_id = "current-patient"
-    visit_id = f"scan-{session_id[:8]}"
     persisted_assets = {
         "rgb": paths["rgb"],
         "rgb_roi": session_path / "current_rgb_roi.png",
@@ -913,13 +921,11 @@ def _analyze_current_scan(sources: dict[str, UploadFile]) -> AnalyzeCurrentRespo
         "structural_overview": session_path / "current_structural_overview.png",
     }
     try:
-        analysis_id = store.save_analysis(
-            patient_id,
-            visit_id,
-            measurements.model_dump(),
-            "Thermal image is preserved for relative contrast review; WoundLens does not interpret image pixels as Celsius.",
-            persisted_assets,
-        )
+        visit = store.create_visit(patient_id, clinical_notes)
+        visit_id = visit["id"]
+        saved_assets = storage.save_visit_assets(patient_id, visit_id, persisted_assets)
+        store.save_assets(visit_id, saved_assets)
+        analysis_id = store.save_analysis(visit_id, measurements.model_dump(), "Thermal image is preserved for relative contrast review; WoundLens does not interpret image pixels as Celsius.")
     except Exception as error:
         LOGGER.exception("Unable to persist analysis session %s", session_id)
         raise HTTPException(status_code=500, detail="Analysis completed but could not be saved.") from error
@@ -927,29 +933,26 @@ def _analyze_current_scan(sources: dict[str, UploadFile]) -> AnalyzeCurrentRespo
         analysis_id=analysis_id,
         patient_id=patient_id,
         visit_id=visit_id,
-        assets={
-            "rgb": _asset_url(session_id, "current_rgb"),
-            "rgb_roi": _asset_url(session_id, "current_rgb_roi"),
-            "thermal": _asset_url(session_id, "current_thermal"),
-            "depth": _asset_url(session_id, "current_depth"),
-            "relative_depth": _asset_url(session_id, "current_relative_depth"),
-            "surface": _asset_url(session_id, "current_3d"),
-            "structural_overview": _asset_url(session_id, "current_structural_overview"),
-            "detection_debug": _asset_url(session_id, "current_detection_debug"),
-        },
+        assets={name: _stored_asset_url(patient_id, visit_id, path.name) for name, path in saved_assets.items()},
         structural_measurements=measurements,
         surface_region_label="3D Wound Surface - Automatic ROI",
         roi_mapping_method=mapping_method,
         segmentation_status="success",
         segmentation_score=segmentation.score,
         thermal_assistance_used=segmentation.thermal_assistance_used,
+        rgb_url=_stored_asset_url(patient_id, visit_id, saved_assets["rgb"].name),
+        thermal_url=_stored_asset_url(patient_id, visit_id, saved_assets["thermal"].name),
+        wound_overlay_url=_stored_asset_url(patient_id, visit_id, saved_assets["rgb_roi"].name),
+        relative_depth_map_url=_stored_asset_url(patient_id, visit_id, saved_assets["relative_depth"].name),
+        surface_3d_url=_stored_asset_url(patient_id, visit_id, saved_assets["surface"].name),
     )
 
 
 repository = DatasetRepository(DATASET_DIR)
 model = WoundLensModel()
-store = WoundLensStore(PROJECT_ROOT / "woundlens_data")
-gemini = GeminiService()
+store = WoundLensStore(DATABASE_PATH)
+storage = StorageService(store.storage_root)
+ai_service = GroqService()
 app = FastAPI(title="WoundLens ML API")
 app.add_middleware(
     CORSMiddleware,
@@ -964,10 +967,75 @@ app.add_middleware(
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "model_loaded": model.change_model is not None,
-        "dataset_configured": DATASET_DIR.exists(),
-        "dataset_directory": str(DATASET_DIR),
+        "database": store.healthy(),
+        "groq_configured": ai_service.configured,
     }
+
+
+def _stored_asset_url(patient_id: str, visit_id: str, filename: str) -> str:
+    return f"/storage/patients/{patient_id}/visits/{visit_id}/{filename}"
+
+
+def _visit_response(record: dict[str, Any]) -> dict[str, Any]:
+    result = dict(record)
+    if record.get("assets"):
+        result["assets"] = {name: _stored_asset_url(record["patient_id"], record["id"], Path(path).name) for name, path in record["assets"].items()}
+    return result
+
+
+@app.post("/patients")
+def create_patient(patient: PatientCreate) -> dict[str, Any]:
+    try:
+        return store.create_patient(patient.patient_code, patient.display_name, patient.age)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/patients")
+def patients() -> list[dict[str, Any]]:
+    return store.patients()
+
+
+@app.get("/patients/{patient_id}")
+def patient(patient_id: str) -> dict[str, Any]:
+    record = store.patient(patient_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Patient was not found.")
+    return record
+
+
+@app.post("/patients/{patient_id}/visits")
+def create_patient_visit(patient_id: str, visit: VisitCreate) -> dict[str, Any]:
+    try:
+        return _visit_response(store.create_visit(patient_id, visit.clinical_notes, visit.visit_date))
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/patients/{patient_id}/visits")
+def patient_visits(patient_id: str) -> list[dict[str, Any]]:
+    try:
+        return [_visit_response(item) for item in store.visits_for_patient(patient_id)]
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/visits/{visit_id}")
+def visit(visit_id: str) -> dict[str, Any]:
+    record = store.visit(visit_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Visit was not found.")
+    return _visit_response(record)
+
+
+@app.get("/storage/patients/{patient_id}/visits/{visit_id}/{filename}")
+def stored_asset(patient_id: str, visit_id: str, filename: str) -> FileResponse:
+    if filename not in {"rgb.png", "thermal.png", "depth.png", "rgb_roi.png", "relative_depth.png", "surface.png", "structural_overview.png"}:
+        raise HTTPException(status_code=404, detail="Unknown saved asset.")
+    path = storage.root / "patients" / patient_id / "visits" / visit_id / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Saved asset was not found.")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.get("/cases", response_model=list[CaseSummary])
@@ -1032,6 +1100,8 @@ def analyze_upload(
 
 @app.post("/analyze-current", response_model=AnalyzeCurrentResponse)
 def analyze_current(
+    patient_id: str = Form(...),
+    clinical_notes: str = Form(""),
     rgb_file: UploadFile = File(...),
     thermal_file: UploadFile = File(...),
     depth_file: UploadFile = File(...),
@@ -1040,71 +1110,67 @@ def analyze_current(
     for modality, upload in uploads.items():
         if Path(upload.filename or "").suffix.lower() not in IMAGE_EXTENSIONS:
             raise HTTPException(status_code=422, detail=f"{modality} must be a PNG or JPEG image.")
-    return _analyze_current_scan(uploads)
+    return _analyze_current_scan(uploads, patient_id, clinical_notes)
 
 
-@app.post("/ai/explain-assessment")
-def explain_assessment(request: AiExplanationRequest) -> dict[str, Any]:
-    record = store.analysis(request.analysis_id)
-    if record is None:
+@app.post("/ai/explain-assessment/{visit_id}")
+def explain_assessment(visit_id: str) -> dict[str, Any]:
+    record = store.visit(visit_id)
+    if record is None or not record.get("analysis"):
         raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    if record["patient_id"] != request.patient_id or record["visit_id"] != request.visit_id:
-        raise HTTPException(status_code=422, detail="Assessment identifiers do not match the saved analysis.")
+    analysis = record["analysis"]
     payload = {
         "patient_id": record["patient_id"],
-        "visit_id": record["visit_id"],
-        **record["metrics"],
-        "thermal_summary": record["thermal_summary"],
-        "clinical_notes": request.clinical_notes,
+        "visit_id": record["id"],
+        "wound_roi_pixels": analysis["wound_roi_pixels"],
+        "relative_depth_range": analysis["relative_depth_range"],
+        "mean_absolute_depth_variation": analysis["mean_depth_variation"],
+        "depth_variation_std": analysis["depth_variation_std"],
+        "thermal_summary": analysis["thermal_summary"],
+        "clinical_notes": record["clinical_notes"],
     }
     try:
-        summary = gemini.explain_assessment(payload).model_dump()
-    except GeminiUnavailable as error:
+        summary = ai_service.explain_assessment(payload).model_dump()
+    except AIUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-    store.update_summary(request.analysis_id, summary)
+    store.save_summary(visit_id, summary)
     return summary
 
 
-@app.put("/analyses/{analysis_id}/clinical-plan", response_model=ClinicalPlan)
-def save_clinical_plan(analysis_id: str, plan: ClinicalPlan) -> ClinicalPlan:
-    if store.analysis(analysis_id) is None:
-        raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    store.save_plan(analysis_id, plan.model_dump())
-    return plan
+@app.post("/visits/{visit_id}/clinical-plan")
+def save_clinical_plan(visit_id: str, plan: ClinicalPlanInput) -> dict[str, Any]:
+    if store.visit(visit_id) is None:
+        raise HTTPException(status_code=404, detail="Visit was not found.")
+    store.save_plan(visit_id, plan.model_dump())
+    return plan.model_dump()
 
 
-@app.get("/analyses/{analysis_id}/clinical-plan", response_model=ClinicalPlan)
-def clinical_plan(analysis_id: str) -> ClinicalPlan:
-    record = store.analysis(analysis_id)
+@app.get("/visits/{visit_id}/clinical-plan")
+def clinical_plan(visit_id: str) -> dict[str, Any]:
+    record = store.visit(visit_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    return ClinicalPlan.model_validate(record["clinical_plan"] or {})
+        raise HTTPException(status_code=404, detail="Visit was not found.")
+    return record.get("clinical_plan") or ClinicalPlanInput().model_dump()
 
 
-@app.post("/ai/summarize-history/{patient_id}")
-def summarize_history(patient_id: str) -> dict[str, Any]:
-    entries = store.history(patient_id)
-    if not entries:
-        raise HTTPException(status_code=404, detail="No saved assessments were found for this patient.")
-    try:
-        return gemini.summarize_history(patient_id, entries).model_dump()
-    except GeminiUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-
-
-@app.post("/reports/{analysis_id}", response_model=ReportResponse)
-def generate_report(analysis_id: str) -> ReportResponse:
-    record = store.analysis(analysis_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    destination = store.report_root / f"woundlens-report-{analysis_id}.pdf"
+@app.post("/reports/{visit_id}")
+def generate_report(visit_id: str) -> dict[str, str]:
+    record = store.visit(visit_id)
+    if record is None or not record.get("analysis") or not record.get("assets"):
+        raise HTTPException(status_code=404, detail="Saved visit analysis was not found.")
+    destination = store.report_root / f"woundlens-report-{visit_id}.pdf"
     try:
         create_report(destination, record)
-        report_id = store.save_report(analysis_id, destination)
+        report_id = store.save_report(visit_id, destination)
     except Exception as error:
-        LOGGER.exception("Unable to generate report for analysis %s", analysis_id)
+        LOGGER.exception("Unable to generate report for visit %s", visit_id)
         raise HTTPException(status_code=500, detail="Report generation failed.") from error
-    return ReportResponse(report_id=report_id, report_url=f"/reports/{report_id}")
+    return {"report_id": report_id, "pdf_url": f"/reports/{report_id}"}
+
+
+@app.get("/reports")
+def reports() -> list[dict[str, Any]]:
+    return [{**report, "pdf_url": f"/reports/{report['id']}"} for report in store.reports()]
 
 
 @app.get("/reports/{report_id}")

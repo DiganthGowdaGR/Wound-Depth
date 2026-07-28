@@ -1,2 +1,18 @@
-import { EmptyModuleScreen } from './EmptyModuleScreen';
-export function PatientListScreen() { return <EmptyModuleScreen title="Patients" message="No patients saved yet." icon="people-outline" />; }
+import { useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Patient } from '../services/woundlensApi';
+import { Card, PrimaryButton } from '../components/Primitives';
+import { colors, layout, typography } from '../theme';
+
+export function PatientListScreen({ patients, onCreate, onOpen }: { patients: Patient[]; onCreate: (input: { patientCode: string; displayName: string; age?: number }) => Promise<void>; onOpen: (patient: Patient) => void }) {
+  const [patientCode, setPatientCode] = useState(''); const [displayName, setDisplayName] = useState(''); const [age, setAge] = useState(''); const [saving, setSaving] = useState(false); const [error, setError] = useState<string | null>(null);
+  const create = async () => { setError(null); if (!patientCode.trim() || !displayName.trim()) { setError('Patient ID and display name are required.'); return; } setSaving(true); try { await onCreate({ patientCode, displayName, age: age ? Number(age) : undefined }); setPatientCode(''); setDisplayName(''); setAge(''); } catch (e) { setError(e instanceof Error ? e.message : 'Unable to create patient.'); } finally { setSaving(false); } };
+  return <ScrollView contentContainerStyle={styles.page}><View style={styles.content}>
+    <Text style={typography.title}>Patients</Text>
+    <Card style={styles.form}><Text style={typography.sectionTitle}>New Patient</Text><Field label="Patient ID" value={patientCode} onChange={setPatientCode} placeholder="e.g. WL-0001" /><Field label="Display name" value={displayName} onChange={setDisplayName} placeholder="Patient name" /><Field label="Age (optional)" value={age} onChange={setAge} placeholder="Years" keyboardType="numeric" />{error ? <Text style={styles.error}>{error}</Text> : null}<PrimaryButton icon="person-add-outline" onPress={() => void create()} disabled={saving}>{saving ? 'Creating...' : 'Create Patient'}</PrimaryButton></Card>
+    <Text style={typography.sectionTitle}>Saved Patients</Text>
+    {patients.length ? patients.map((patient) => <Pressable key={patient.id} onPress={() => onOpen(patient)}><Card style={styles.patient}><View><Text style={styles.patientName}>{patient.displayName}</Text><Text style={styles.meta}>{patient.patientCode}{patient.age !== null && patient.age !== undefined ? `  |  Age ${patient.age}` : ''}</Text></View><Text style={styles.visits}>{patient.visitCount} visits</Text></Card></Pressable>) : <Card><Text style={styles.meta}>No patients saved yet.</Text></Card>}
+  </View></ScrollView>;
+}
+function Field({ label, value, onChange, placeholder, keyboardType }: { label: string; value: string; onChange: (value: string) => void; placeholder: string; keyboardType?: 'default' | 'numeric' }) { return <View style={styles.field}><Text style={styles.label}>{label}</Text><TextInput value={value} placeholder={placeholder} keyboardType={keyboardType} onChangeText={onChange} style={styles.input} /></View>; }
+const styles = StyleSheet.create({ page: { padding: layout.pagePadding, alignItems: 'center' }, content: { width: '100%', maxWidth: 760, gap: 14 }, form: { gap: 12 }, field: { gap: 5 }, label: { ...typography.label }, input: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceMuted, borderRadius: 8, minHeight: 44, paddingHorizontal: 12, ...typography.body }, patient: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, patientName: { ...typography.subtitle }, meta: { ...typography.body, color: colors.textMuted }, visits: { ...typography.caption, color: colors.primary, fontWeight: '800' }, error: { ...typography.body, color: colors.danger } });

@@ -22,11 +22,12 @@ Set the dataset directory only when using the dataset visit screens:
 $env:WOUNDLENS_DATASET_DIR="C:\path\to\results"
 ```
 
-Gemini is optional and is used only by the FastAPI documentation-assistant endpoints. Do not add API keys to source files. Set one key or a comma-separated failover list before launching the backend:
+Groq is optional and is used only by the FastAPI documentation-assistant endpoint. Do not add API keys to source files. Set one key or a comma-separated failover list before launching the backend:
 
 ```powershell
-$env:GEMINI_API_KEY="your-key"
-# Or: $env:GEMINI_API_KEYS="primary-key,secondary-key"
+$env:GROQ_API_KEY="your-key"
+# Or: $env:GROQ_API_KEYS="primary-key,secondary-key,tertiary-key"
+# WoundLens rotates the starting key per request and tries the remaining keys if one fails.
 ```
 
 ## Run
@@ -57,4 +58,4 @@ npx expo export --platform web --clear
 
 - Relative-depth results describe visible surface geometry and are not calibrated physical depth in millimetres.
 - WoundLens does not determine muscle involvement from uploaded images.
-- Gemini text summarizes measured data and clinician-entered notes only. It is not an autonomous diagnosis or prescription.
+- Groq text summarizes measured data and clinician-entered notes only. It is not an autonomous diagnosis or prescription.

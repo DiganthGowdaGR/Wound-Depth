@@ -647,7 +647,9 @@ def _automatic_wound_localization(rgb_image: Path, thermal_image: Path) -> Autom
     else:
         likelihood = rgb_score
 
-    candidate = (likelihood >= np.percentile(likelihood[limb_mask], 92)) & (rgb_score >= np.percentile(rgb_score[limb_mask], 75)) & limb_mask
+    # Keep connected red, yellow, and dark wound-bed tissue together. A stricter seed split
+    # elongated ulcers into separate components and could select only the distal fragment.
+    candidate = (likelihood >= np.percentile(likelihood[limb_mask], 85)) & (rgb_score >= np.percentile(rgb_score[limb_mask], 75)) & limb_mask
     candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     label_count, labels, stats, centers = cv2.connectedComponentsWithStats(candidate, connectivity=8)
@@ -701,12 +703,14 @@ def _automatic_wound_localization(rgb_image: Path, thermal_image: Path) -> Autom
             continue
         margin_score = float(np.clip(margin / max(1.0, min(width, height) * 0.5), 0.0, 1.0))
         core_area = int(core_mask.sum())
-        area_score = float(np.exp(-abs(np.log(max(core_area / image_area, 1e-6) / 0.03))))
+        # In this workflow the visible wound bed is often elongated. Prefer a coherent
+        # wound-bed extent over a tiny, very-red patch on nearby intact skin.
+        area_score = float(np.exp(-abs(np.log(max(core_area / image_area, 1e-6) / 0.12))))
         mean_rgb = float(rgb_score[core_mask].mean())
         mean_thermal = float(thermal_score[core_mask].mean()) if thermal_assistance_used else 0.0
         component_density = float(source_mask.sum() / max(1, int(core_mask.sum())))
         group_evidence = min(1.0, len(group) / 3.0)
-        score = (0.42 * mean_rgb) + (0.08 * mean_thermal) + (0.25 * margin_score) + (0.14 * area_score) + (0.06 * component_density) + (0.05 * group_evidence)
+        score = (0.32 * mean_rgb) + (0.07 * mean_thermal) + (0.10 * margin_score) + (0.34 * area_score) + (0.10 * component_density) + (0.07 * group_evidence)
         if score > best_score:
             best_mask = proposed
             best_score = score

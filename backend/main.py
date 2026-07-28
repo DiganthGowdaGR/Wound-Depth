@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 
 from backend.database import DATABASE_PATH
+from backend.environment import load_local_env
 from backend.persistence import WoundLensStore
 from backend.schemas import ClinicalPlanInput, PatientCreate, VisitCreate
 from backend.services.groq_service import AIUnavailable, GroqService
@@ -35,6 +36,7 @@ from matplotlib.figure import Figure
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_local_env(PROJECT_ROOT / ".env")
 MODEL_DIR = PROJECT_ROOT / "woundlens_trained_model"
 DATASET_DIR = Path(os.environ.get("WOUNDLENS_DATASET_DIR", PROJECT_ROOT / "dataset")).resolve()
 SESSION_DIR = Path(tempfile.gettempdir()) / "woundlens-upload-sessions"

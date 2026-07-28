@@ -14,7 +14,7 @@ export interface SavedVisit {
 export interface CurrentWoundAssessment {
   analysisId: string; patientId: string; visitId: string; assets: Partial<Record<Modality, string>>;
   woundRoiPixels: number; relativeDepthRange: number; meanAbsoluteDepthVariation: number; depthVariationStd: number;
-  surfaceRegionLabel: string; roiMappingMethod: string; segmentationStatus: 'success'; segmentationScore: number; thermalAssistanceUsed: boolean;
+  surfaceRegionLabel: string; roiMappingMethod: string; segmentationStatus: 'success' | 'review_required'; segmentationScore: number; thermalAssistanceUsed: boolean;
 }
 export interface AiMeasuredFinding { label: string; value: string; interpretation: string; }
 export interface AiAssessmentSummary { headline: string; assessmentSummary: string; measuredFindings: AiMeasuredFinding[]; structuralFindings: string[]; thermalFindings: string[]; attentionPoints: string[]; dataQuality: string[]; clinicianSummary: string; patientFriendlySummary: string; modelName?: string; reviewedByClinician: boolean; reviewedAt?: string | null; }
@@ -102,7 +102,7 @@ interface ApiAnalysis { id: string; wound_roi_pixels: number; relative_depth_ran
 interface ApiPlan { clinician_assessment: string; medication: string; wound_care_plan: string; follow_up_interval: string; additional_tests: string; escalation_required: boolean; }
 interface ApiAiSummary { headline?: string; assessment_summary: string; measured_findings?: { label: string; value: string; interpretation: string }[]; structural_findings: string[]; thermal_findings: string[]; attention_points: string[]; data_quality?: string[]; clinician_summary: string; patient_friendly_summary: string; model_name?: string; reviewed_by_clinician?: boolean; reviewed_at?: string | null; }
 interface ApiVisit { id: string; patient_id: string; patient_code: string; display_name: string; age?: number | null; visit_date: string; clinical_notes: string; created_at: string; assets?: ApiAssets; analysis?: ApiAnalysis; ai_summary?: ApiAiSummary; clinical_plan?: ApiPlan; }
-interface ApiCurrentAssessment { analysis_id: string; patient_id: string; visit_id: string; assets: ApiAssets; structural_measurements: { wound_roi_pixels: number; relative_depth_range: number; mean_absolute_depth_variation: number; depth_variation_std: number; }; surface_region_label: string; roi_mapping_method: string; segmentation_status: 'success'; segmentation_score: number; thermal_assistance_used: boolean; }
+interface ApiCurrentAssessment { analysis_id: string; patient_id: string; visit_id: string; assets: ApiAssets; structural_measurements: { wound_roi_pixels: number; relative_depth_range: number; mean_absolute_depth_variation: number; depth_variation_std: number; }; surface_region_label: string; roi_mapping_method: string; segmentation_status: 'success' | 'review_required'; segmentation_score: number; thermal_assistance_used: boolean; }
 interface ApiReport { id: string; visit_id: string; patient_code: string; display_name: string; visit_date: string; created_at: string; pdf_url: string; }
 
 function mapPatient(item: ApiPatient): Patient { return { id: item.id, patientCode: item.patient_code, displayName: item.display_name, age: item.age, createdAt: item.created_at, visitCount: item.visit_count }; }

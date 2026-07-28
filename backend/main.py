@@ -715,7 +715,9 @@ def _automatic_wound_localization(rgb_image: Path, thermal_image: Path) -> Autom
             best_mask = proposed
             best_score = score
 
-    if best_mask is None or best_score < 0.50:
+    # Below 0.50, retain a bounded candidate for clinician review instead of rejecting
+    # an otherwise valid multimodal scan. Very weak candidates still stop analysis.
+    if best_mask is None or best_score < 0.42:
         raise ValueError("Automatic wound localization is uncertain: candidate quality checks did not pass.")
     return AutomaticSegmentation(best_mask, likelihood, best_score, thermal_assistance_used)
 
@@ -943,7 +945,7 @@ def _analyze_current_scan(sources: dict[str, UploadFile], patient_id: str, clini
         structural_measurements=measurements,
         surface_region_label="3D Wound Surface - Automatic ROI",
         roi_mapping_method=mapping_method,
-        segmentation_status="success",
+        segmentation_status="success" if segmentation.score >= 0.50 else "review_required",
         segmentation_score=segmentation.score,
         thermal_assistance_used=segmentation.thermal_assistance_used,
         rgb_url=_stored_asset_url(patient_id, visit_id, saved_assets["rgb"].name),

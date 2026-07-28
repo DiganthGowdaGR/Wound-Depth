@@ -1,0 +1,31 @@
+import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState } from 'react';
+import { Modality, StructuralAssessment, WoundVisit, mediaUrl } from '../services/woundlensApi';
+import { colors, typography } from '../theme';
+
+export function StructuralAssessmentRow({ label, visit, assessment, surfaceLabel }: { label: string; visit: WoundVisit; assessment?: StructuralAssessment; surfaceLabel?: string }) {
+  const [expanded, setExpanded] = useState<{ label: string; source: string } | null>(null);
+  const panels: { label: string; type: Modality; source?: string; detail?: string }[] = [
+    { label: 'RGB + Wound ROI', type: 'rgb_roi', source: mediaUrl(visit, 'rgb_roi') ?? mediaUrl(visit, 'rgb') },
+    { label: 'Thermal View', type: 'thermal', source: mediaUrl(visit, 'thermal') },
+    { label: 'Wound Relative Depth Map', type: 'relative_depth', source: mediaUrl(visit, 'relative_depth'), detail: 'Relative depth value' },
+    { label: surfaceLabel ?? '3D Wound Surface', type: 'surface', source: mediaUrl(visit, 'surface') },
+  ];
+  return <View style={styles.rowWrapper}>
+    <View style={styles.rowHeader}><Text style={styles.rowLabel}>{label}</Text><Text style={styles.visitDay}>{visit.visitDate}</Text></View>
+    <View style={styles.panelGrid}>
+      <View style={styles.topGrid}>{panels.slice(0, 2).map((panel) => <VisualPanel key={panel.type} {...panel} />)}</View>
+      <View style={styles.structuralSection}><Text style={styles.sectionTitle}>Structural Analysis</Text><View style={styles.structuralGrid}>{panels.slice(2).map((panel) => <VisualPanel key={panel.type} {...panel} onExpand={(source) => setExpanded({ label: panel.label, source })} />)}</View></View>
+    </View>
+    {assessment ? <View style={styles.stats}><Stat label="Relative depth range" value={assessment.depthStatistics.relativeDepthRange.toFixed(2)} /><Stat label="Mean absolute variation" value={assessment.depthStatistics.meanAbsoluteVariation.toFixed(2)} /><Stat label="Depth variation standard deviation" value={assessment.depthStatistics.depthVariationStd.toFixed(2)} /><Stat label={`${assessment.depthStatistics.regionLabel} pixel count`} value={String(assessment.depthStatistics.woundRoiPixelCount)} /></View> : <Text style={styles.unavailable}>Structural statistics unavailable</Text>}
+    <Text style={styles.limit}>Relative depth measurements - not calibrated physical depth in mm.</Text>
+    <Modal visible={expanded !== null} transparent animationType="fade" onRequestClose={() => setExpanded(null)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><View style={styles.modalHeader}><Text style={styles.modalTitle}>{expanded?.label}</Text><Pressable onPress={() => setExpanded(null)}><Text style={styles.close}>Close</Text></Pressable></View>{expanded ? <Image source={{ uri: expanded.source }} style={styles.expandedImage} resizeMode="contain" /> : null}</View></View></Modal>
+  </View>;
+}
+
+function VisualPanel({ label, type, source, detail, onExpand }: { label: string; type: Modality; source?: string; detail?: string; onExpand?: (source: string) => void }) { const large = type === 'relative_depth' || type === 'surface'; return <View style={[styles.panel, large && styles.largePanel]}><View style={styles.panelHeader}><Text style={styles.panelLabel}>{label}</Text>{detail ? <Text style={styles.detail}>{detail}</Text> : null}{source && onExpand ? <Pressable onPress={() => onExpand(source)}><Text style={styles.expand}>Expand</Text></Pressable> : null}</View><View style={[styles.frame, large && styles.largeFrame]}>{source ? <Image source={{ uri: source }} style={styles.image} resizeMode="contain" /> : <Text style={styles.unavailable}>{type === 'rgb_roi' ? 'ROI unavailable' : 'Visualization unavailable'}</Text>}</View></View>; }
+function Stat({ label, value }: { label: string; value: string }) { return <View style={styles.stat}><Text style={styles.statLabel}>{label}</Text><Text style={styles.statValue}>{value}</Text></View>; }
+
+const styles = StyleSheet.create({
+  rowWrapper: { gap: 9 }, rowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, rowLabel: { ...typography.subtitle, color: colors.primary }, visitDay: { ...typography.caption, color: colors.text, fontWeight: '800' }, panelGrid: { gap: 14 }, topGrid: { flexDirection: 'row', gap: 10 }, structuralSection: { gap: 8 }, sectionTitle: { ...typography.subtitle, color: colors.text }, structuralGrid: { flexDirection: 'row', gap: 10 }, panel: { flex: 1, minWidth: 185, borderRadius: 8, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', backgroundColor: colors.surface }, largePanel: { minWidth: 0 }, panelHeader: { minHeight: 43, paddingHorizontal: 9, justifyContent: 'center', borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: '#f8fbff' }, panelLabel: { ...typography.label, color: colors.text }, detail: { ...typography.caption, color: colors.primary }, expand: { ...typography.caption, color: colors.primary, fontWeight: '800', marginTop: 2 }, frame: { height: 190, alignItems: 'center', justifyContent: 'center', backgroundColor: '#eef3f7' }, largeFrame: { height: 420 }, image: { width: '100%', height: '100%' }, unavailable: { ...typography.caption, color: colors.textMuted, textAlign: 'center', paddingHorizontal: 8 }, stats: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, stat: { flex: 1, minWidth: 160, padding: 9, borderRadius: 6, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border }, statLabel: { ...typography.caption }, statValue: { ...typography.subtitle }, limit: { ...typography.caption, color: colors.textMuted }, modalBackdrop: { flex: 1, backgroundColor: 'rgba(12, 18, 34, 0.82)', padding: 20, justifyContent: 'center' }, modalContent: { width: '100%', maxWidth: 1200, alignSelf: 'center', backgroundColor: colors.surface, borderRadius: 8, padding: 14, gap: 10, maxHeight: '94%' }, modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, modalTitle: { ...typography.sectionTitle }, close: { ...typography.body, color: colors.primary, fontWeight: '800' }, expandedImage: { width: '100%', aspectRatio: 1.35, maxHeight: 760 },
+});

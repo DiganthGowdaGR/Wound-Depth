@@ -1,0 +1,30 @@
+# JavaScript / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+npm-debug.log*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Runtime medical data and generated reports
+woundlens_data/
+dataset/
+*.sqlite3
+*.pdf
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/

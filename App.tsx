@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import { analyzeCurrent, createPatient, CurrentWoundAssessment, getPatientVisits, getPatients, getReports, Patient, SavedReport, SavedVisit, UploadedScanInput } from './src/services/woundlensApi';
 import { BottomNav, Header } from './src/components/Chrome';
@@ -17,8 +17,22 @@ export type ScreenKey = 'dashboard' | 'patients' | 'detail' | 'history' | 'repor
 
 export default function App() {
   const [screen, setScreen] = useState<ScreenKey>('patients'); const [patients, setPatients] = useState<Patient[]>([]); const [reports, setReports] = useState<SavedReport[]>([]); const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null); const [visits, setVisits] = useState<SavedVisit[]>([]); const [assessment, setAssessment] = useState<CurrentWoundAssessment | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
-  const refresh = useCallback(async () => { setLoading(true); setError(null); try { const [savedPatients, savedReports] = await Promise.all([getPatients(), getReports()]); setPatients(savedPatients); setReports(savedReports); if (selectedPatient) { const refreshed = savedPatients.find((patient) => patient.id === selectedPatient.id) ?? null; setSelectedPatient(refreshed); if (refreshed) setVisits(await getPatientVisits(refreshed.id)); } } catch (err) { setError(err instanceof Error ? err.message : 'Unable to connect to WoundLens backend.'); } finally { setLoading(false); } }, [selectedPatient]);
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const [savedPatients, savedReports] = await Promise.all([getPatients(), getReports()]);
+        if (!mounted) return;
+        setPatients(savedPatients);
+        setReports(savedReports);
+      } catch (err) {
+        if (mounted) setError(err instanceof Error ? err.message : 'Unable to connect to WoundLens backend.');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
   const selectPatient = async (patient: Patient) => { setSelectedPatient(patient); setLoading(true); try { setVisits(await getPatientVisits(patient.id)); setScreen('detail'); } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load patient visits.'); } finally { setLoading(false); } };
   const addPatient = async (input: { patientCode: string; displayName: string; age?: number }) => { const patient = await createPatient(input); setPatients((items) => [patient, ...items]); await selectPatient(patient); };
   const runAnalysis = async (uploads: Record<'rgb' | 'thermal' | 'depth', UploadedScanInput>) => { if (!selectedPatient) throw new Error('Select a patient before analyzing a scan.'); const result = await analyzeCurrent(selectedPatient.id, uploads); setAssessment(result); setVisits(await getPatientVisits(selectedPatient.id)); setReports(await getReports()); setScreen('result'); };

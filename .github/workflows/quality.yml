@@ -1,0 +1,33 @@
+name: Quality Checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx expo export --platform web --clear
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python -m py_compile backend/main.py backend/persistence.py backend/report_service.py
+      - run: python -c "from backend.main import app; assert app.title == 'WoundLens ML API'; print('backend import: PASS')"

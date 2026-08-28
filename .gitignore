@@ -24,6 +24,7 @@ dataset/
 *.sqlite3
 backend/woundlens.db
 backend/storage/
+storage/
 *.pdf
 
 # OS and editor files

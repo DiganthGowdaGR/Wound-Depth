@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from backend.database import DATABASE_PATH
 from backend.environment import load_local_env
 from backend.persistence import WoundLensStore
-from backend.schemas import ClinicalPlanInput, PatientCreate, VisitCreate
+from backend.schemas import ClinicalContextInput, ClinicalPlanInput, PatientCreate, VisitCreate
 from backend.services.groq_service import AIUnavailable, GroqService
 from backend.services.report_service import create_report
 from backend.services.storage_service import StorageService
@@ -647,7 +647,9 @@ def _automatic_wound_localization(rgb_image: Path, thermal_image: Path) -> Autom
     else:
         likelihood = rgb_score
 
-    candidate = (likelihood >= np.percentile(likelihood[limb_mask], 92)) & (rgb_score >= np.percentile(rgb_score[limb_mask], 75)) & limb_mask
+    # Keep connected red, yellow, and dark wound-bed tissue together. A stricter seed split
+    # elongated ulcers into separate components and could select only the distal fragment.
+    candidate = (likelihood >= np.percentile(likelihood[limb_mask], 85)) & (rgb_score >= np.percentile(rgb_score[limb_mask], 75)) & limb_mask
     candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     label_count, labels, stats, centers = cv2.connectedComponentsWithStats(candidate, connectivity=8)
@@ -701,17 +703,21 @@ def _automatic_wound_localization(rgb_image: Path, thermal_image: Path) -> Autom
             continue
         margin_score = float(np.clip(margin / max(1.0, min(width, height) * 0.5), 0.0, 1.0))
         core_area = int(core_mask.sum())
-        area_score = float(np.exp(-abs(np.log(max(core_area / image_area, 1e-6) / 0.03))))
+        # In this workflow the visible wound bed is often elongated. Prefer a coherent
+        # wound-bed extent over a tiny, very-red patch on nearby intact skin.
+        area_score = float(np.exp(-abs(np.log(max(core_area / image_area, 1e-6) / 0.12))))
         mean_rgb = float(rgb_score[core_mask].mean())
         mean_thermal = float(thermal_score[core_mask].mean()) if thermal_assistance_used else 0.0
         component_density = float(source_mask.sum() / max(1, int(core_mask.sum())))
         group_evidence = min(1.0, len(group) / 3.0)
-        score = (0.42 * mean_rgb) + (0.08 * mean_thermal) + (0.25 * margin_score) + (0.14 * area_score) + (0.06 * component_density) + (0.05 * group_evidence)
+        score = (0.32 * mean_rgb) + (0.07 * mean_thermal) + (0.10 * margin_score) + (0.34 * area_score) + (0.10 * component_density) + (0.07 * group_evidence)
         if score > best_score:
             best_mask = proposed
             best_score = score
 
-    if best_mask is None or best_score < 0.50:
+    # Below 0.50, retain a bounded candidate for clinician review instead of rejecting
+    # an otherwise valid multimodal scan. Very weak candidates still stop analysis.
+    if best_mask is None or best_score < 0.42:
         raise ValueError("Automatic wound localization is uncertain: candidate quality checks did not pass.")
     return AutomaticSegmentation(best_mask, likelihood, best_score, thermal_assistance_used)
 
@@ -939,7 +945,7 @@ def _analyze_current_scan(sources: dict[str, UploadFile], patient_id: str, clini
         structural_measurements=measurements,
         surface_region_label="3D Wound Surface - Automatic ROI",
         roi_mapping_method=mapping_method,
-        segmentation_status="success",
+        segmentation_status="success" if segmentation.score >= 0.50 else "review_required",
         segmentation_score=segmentation.score,
         thermal_assistance_used=segmentation.thermal_assistance_used,
         rgb_url=_stored_asset_url(patient_id, visit_id, saved_assets["rgb"].name),
@@ -983,6 +989,124 @@ def _visit_response(record: dict[str, Any]) -> dict[str, Any]:
     if record.get("assets"):
         result["assets"] = {name: _stored_asset_url(record["patient_id"], record["id"], Path(path).name) for name, path in record["assets"].items()}
     return result
+
+
+def _measured_findings(analysis: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"label": "Relative depth range", "value": f"{analysis['relative_depth_range']:.2f} relative units", "interpretation": "Variation across the reconstructed visible wound surface."},
+        {"label": "Mean surface variation", "value": f"{analysis['mean_depth_variation']:.2f}", "interpretation": "Average magnitude of relative surface variation in the analyzed wound region."},
+        {"label": "Depth variation", "value": f"{analysis['depth_variation_std']:.2f}", "interpretation": "Heterogeneity of the reconstructed relative surface geometry."},
+        {"label": "Detected wound ROI", "value": f"{analysis['wound_roi_pixels']} pixels", "interpretation": "Image pixels classified as belonging to the analyzed wound region."},
+    ]
+
+
+def _data_quality(record: dict[str, Any]) -> list[str]:
+    assets = record.get("assets", {})
+    analysis = record.get("analysis")
+    return [
+        f"RGB: {'Available' if assets.get('rgb') else 'Unavailable'}",
+        f"Thermal: {'Available' if assets.get('thermal') else 'Unavailable'}",
+        f"Depth: {'Available' if assets.get('depth') else 'Unavailable'}",
+        f"Wound localization: {'Available' if assets.get('rgb_roi') else 'Unavailable'}",
+        f"3D reconstruction: {'Available' if assets.get('surface') else 'Unavailable'}",
+        f"Structural metrics: {'Available' if analysis else 'Unavailable'}",
+        "Relative depth values are not calibrated physical depth in millimetres.",
+    ]
+
+
+def _measurement_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Provide a usable summary when an external narrative provider is unavailable.
+
+    This is deliberately assembled only from persisted WoundLens outputs. It is
+    not presented as a generative AI response and cannot add clinical claims.
+    """
+    analysis = record["analysis"]
+    assets = record.get("assets", {})
+    has_history = bool(_previous_visits(record["patient_id"], record["id"]))
+    notes_entered = bool((record.get("clinical_notes") or "").strip())
+    structural_findings = [
+        "The reconstructed wound region contains measurable variation in visible surface geometry.",
+        "Relative depth values describe the reconstructed visible surface and are not calibrated physical depth in millimetres.",
+    ]
+    thermal_findings = [
+        "A thermal image is available for clinician inspection of relative contrast. WoundLens does not interpret this image as a Celsius measurement."
+        if assets.get("thermal")
+        else "Thermal interpretation is omitted because no thermal image is available for this visit."
+    ]
+    attention_points = [
+        "Review the RGB wound localization, relative depth map, and 3D surface together with the clinical examination.",
+        "Confirm the wound assessment and current care plan in the clinical record.",
+    ]
+    if not notes_entered:
+        attention_points.append("No clinician context was entered for this visit.")
+    if not has_history:
+        attention_points.append("Only one saved visit is available, so longitudinal interpretation cannot be performed.")
+    return {
+        "headline": "WoundLens measurement summary",
+        "assessment_summary": (
+            "This summary organizes the saved WoundLens imaging measurements for clinician review. "
+            "It does not diagnose the wound or determine involvement of underlying tissue."
+        ),
+        "measured_findings": _measured_findings(analysis),
+        "structural_findings": structural_findings,
+        "thermal_findings": thermal_findings,
+        "attention_points": attention_points,
+        "data_quality": _data_quality(record),
+        "clinician_summary": (
+            "Use the recorded RGB, thermal, relative-depth, and 3D views with the patient examination and clinician-provided context."
+        ),
+        "patient_friendly_summary": (
+            "Your wound was scanned with normal, thermal, and surface-depth imaging. "
+            "Your care team will review these images with your symptoms and examination."
+        ),
+        "model_name": "WoundLens measured-output summary",
+        "generation_source": "measurement_fallback",
+    }
+
+
+def _previous_visits(patient_id: str, current_visit_id: str) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for visit_record in store.visits_for_patient(patient_id):
+        if visit_record["id"] == current_visit_id:
+            continue
+        item: dict[str, Any] = {"visit_date": visit_record["visit_date"]}
+        if visit_record.get("analysis"):
+            item["structural_analysis"] = visit_record["analysis"]
+        if visit_record.get("clinical_notes"):
+            item["clinician_notes"] = visit_record["clinical_notes"]
+        if visit_record.get("ai_summary"):
+            item["previous_ai_summary"] = visit_record["ai_summary"]["assessment_summary"]
+        if visit_record.get("clinical_plan"):
+            item["clinical_plan"] = visit_record["clinical_plan"]
+        history.append(item)
+    return history[:5]
+
+
+def _ai_assessment_payload(record: dict[str, Any]) -> dict[str, Any]:
+    analysis = record.get("analysis")
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Saved analysis was not found.")
+    assets = record.get("assets", {})
+    return {
+        "patient": {"patient_code": record["patient_code"]},
+        "visit": {"visit_id": record["id"], "visit_date": record["visit_date"]},
+        "structural_analysis": {
+            "wound_roi_pixels": analysis["wound_roi_pixels"],
+            "relative_depth_range": analysis["relative_depth_range"],
+            "mean_absolute_variation": analysis["mean_depth_variation"],
+            "depth_variation_std": analysis["depth_variation_std"],
+        },
+        "thermal_analysis": {"available": bool(assets.get("thermal")), "relative_thermal_summary": analysis["thermal_summary"] if assets.get("thermal") else None},
+        "analysis_quality": {
+            "segmentation_status": "success" if assets.get("rgb_roi") else "unavailable",
+            "depth_available": bool(assets.get("depth")),
+            "thermal_available": bool(assets.get("thermal")),
+            "rgb_available": bool(assets.get("rgb")),
+            "surface_3d_available": bool(assets.get("surface")),
+        },
+        "clinician_notes": record["clinical_notes"] or None,
+        "previous_visits": _previous_visits(record["patient_id"], record["id"]),
+    }
 
 
 @app.post("/patients")
@@ -1120,23 +1244,50 @@ def explain_assessment(visit_id: str) -> dict[str, Any]:
     record = store.visit(visit_id)
     if record is None or not record.get("analysis"):
         raise HTTPException(status_code=404, detail="Saved analysis was not found.")
-    analysis = record["analysis"]
-    payload = {
-        "patient_id": record["patient_id"],
-        "visit_id": record["id"],
-        "wound_roi_pixels": analysis["wound_roi_pixels"],
-        "relative_depth_range": analysis["relative_depth_range"],
-        "mean_absolute_depth_variation": analysis["mean_depth_variation"],
-        "depth_variation_std": analysis["depth_variation_std"],
-        "thermal_summary": analysis["thermal_summary"],
-        "clinical_notes": record["clinical_notes"],
-    }
+    payload = _ai_assessment_payload(record)
     try:
         summary = ai_service.explain_assessment(payload).model_dump()
     except AIUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+        LOGGER.warning("AI narrative provider unavailable for visit %s: %s", visit_id, error)
+        summary = _measurement_summary(record)
+    else:
+        summary["generation_source"] = "ai_provider"
+    summary["measured_findings"] = _measured_findings(record["analysis"])
+    summary["data_quality"] = _data_quality(record)
+    summary["model_name"] = ai_service.model_name
+    if summary["generation_source"] == "measurement_fallback":
+        summary["model_name"] = "WoundLens measured-output summary"
     store.save_summary(visit_id, summary)
-    return summary
+    return {**summary, "reviewed_by_clinician": False, "reviewed_at": None}
+
+
+@app.post("/visits/{visit_id}/clinical-context")
+def save_clinical_context(visit_id: str, context: ClinicalContextInput) -> dict[str, str]:
+    if store.visit(visit_id) is None:
+        raise HTTPException(status_code=404, detail="Visit was not found.")
+    store.update_clinical_notes(visit_id, context.clinical_notes)
+    return {"clinical_notes": context.clinical_notes}
+
+
+@app.post("/visits/{visit_id}/ai-summary/review")
+def mark_ai_summary_reviewed(visit_id: str) -> dict[str, Any]:
+    record = store.mark_summary_reviewed(visit_id)
+    if record is None or not record.get("ai_summary"):
+        raise HTTPException(status_code=404, detail="AI summary was not found.")
+    return record["ai_summary"]
+
+
+@app.post("/ai/summarize-history/{patient_id}")
+def summarize_history(patient_id: str) -> dict[str, Any]:
+    if store.patient(patient_id) is None:
+        raise HTTPException(status_code=404, detail="Patient was not found.")
+    visits = _previous_visits(patient_id, "")
+    if not visits:
+        raise HTTPException(status_code=404, detail="No saved visits were found for this patient.")
+    try:
+        return ai_service.summarize_history({"patient_code": store.patient(patient_id)["patient_code"], "previous_visits": visits}).model_dump()
+    except AIUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @app.post("/visits/{visit_id}/clinical-plan")

@@ -28,6 +28,7 @@ def create_report(destination: Path, record: dict[str, Any]) -> None:
     story.extend([
         Paragraph(f"Patient ID: {record.get('patient_code', record['patient_id'])}", styles["BodyText"]),
         Paragraph(f"Visit date: {record.get('visit_date', record['id'])}", styles["BodyText"]),
+        Paragraph(f"Clinician notes: {record.get('clinical_notes') or 'Not entered'}", styles["BodyText"]),
         Spacer(1, 12),
     ])
     assets = {name: Path(path) for name, path in record["assets"].items()}
@@ -48,6 +49,11 @@ def create_report(destination: Path, record: dict[str, Any]) -> None:
         for finding in summary.get("structural_findings", []) + summary.get("thermal_findings", []) + summary.get("attention_points", []):
             story.append(Paragraph("- " + finding, styles["BodyText"]))
         story.append(Spacer(1, 12))
+        if summary.get("data_quality"):
+            story.append(Paragraph("Data Quality / Limitations", styles["Heading2"]))
+            for item in summary["data_quality"]:
+                story.append(Paragraph("- " + item, styles["BodyText"]))
+            story.append(Spacer(1, 12))
     if record.get("clinical_plan"):
         story.append(Paragraph("Clinician-Entered Clinical Plan", styles["Heading2"]))
         for label, value in record["clinical_plan"].items():
